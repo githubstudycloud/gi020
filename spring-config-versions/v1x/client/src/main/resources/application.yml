@@ -1,0 +1,8 @@
+# application.yml —— 本地配置（优先级低于 Config Server 远程配置）
+server:
+  port: 8080
+
+# 本地默认值，会被远程配置覆盖
+app:
+  message: "Hello from local"
+  version: "1.0"

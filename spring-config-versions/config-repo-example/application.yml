@@ -1,0 +1,15 @@
+# ============================================================
+# 公共配置（所有应用、所有 profile 都会加载）
+# 文件名：application.yml
+# ============================================================
+
+# 公共日志格式
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# 公共追踪配置
+management:
+  tracing:
+    sampling:
+      probability: 1.0

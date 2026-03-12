@@ -1,0 +1,52 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: myapp
+
+  profiles:
+    active: dev
+
+  # ============================================================
+  # 3.x 推荐方式：spring.config.import
+  # bootstrap.yml 已不是默认机制，这是官方推荐的新方式
+  # ============================================================
+  config:
+    import:
+      # 格式：optional:configserver:<url>
+      # optional: 表示 Config Server 不可达时不报错（使用本地默认值）
+      # 去掉 optional: 则 Config Server 不可达时启动失败
+      - "optional:configserver:http://localhost:8888"
+
+      # 携带认证信息：
+      # - "optional:configserver:http://admin:admin123@localhost:8888"
+
+  cloud:
+    config:
+      # 补充配置（uri 也可在 config.import 中指定，二选一）
+      uri: http://localhost:8888
+      username: admin
+      password: admin123
+      label: main        # Git 分支
+      fail-fast: false   # 3.x 中 optional: 前缀已经实现了软失败语义
+      retry:
+        initial-interval: 1000
+        max-attempts: 3
+        max-interval: 2000
+        multiplier: 1.5
+
+# Actuator
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,refresh,env
+  endpoint:
+    health:
+      show-details: always
+
+# 本地默认值
+app:
+  message: "Hello from local (3.x)"
+  version: "3.0"

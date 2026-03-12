@@ -1,0 +1,42 @@
+# ============================================================
+# bootstrap.yml —— Spring Boot 1.x 客户端配置
+# 重要：1.x 中 bootstrap.yml 在 application.yml 之前加载
+# Config Client 在 bootstrap 阶段连接 Config Server 获取远程配置
+# ============================================================
+
+spring:
+  application:
+    name: myapp          # 对应 Config Server 中的 {application}，必须配置
+
+  cloud:
+    config:
+      # Config Server 地址
+      uri: http://localhost:8888
+
+      # 激活的 profile（也可通过命令行 --spring.profiles.active=dev 指定）
+      profile: dev       # 对应 {profile}
+
+      # Git 分支/标签（对应 {label}）
+      label: master
+
+      # Config Server 启用了 Basic Auth 时配置
+      username: admin
+      password: admin123
+
+      # 失败策略
+      fail-fast: true    # true=启动失败时快速报错；false=使用本地默认值继续
+      retry:
+        initial-interval: 1000    # 初始重试间隔(ms)
+        max-attempts: 6           # 最大重试次数
+        max-interval: 2000        # 最大重试间隔(ms)
+        multiplier: 1.1           # 间隔乘数
+
+# 本地兜底配置（Config Server 不可达时使用）
+# 远程配置会覆盖这里的值
+info:
+  app:
+    name: myapp-local-default
+
+management:
+  security:
+    enabled: false   # 允许访问 /refresh 端点（1.x）

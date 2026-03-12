@@ -1,0 +1,49 @@
+server:
+  port: 8888
+
+spring:
+  application:
+    name: config-server
+
+  security:
+    user:
+      name: admin
+      password: admin123
+
+  # 4.x 虚拟线程支持（Java 21 Loom）
+  threads:
+    virtual:
+      enabled: true   # 启用虚拟线程，提高并发处理能力
+
+  cloud:
+    config:
+      server:
+        git:
+          uri: https://github.com/yourorg/config-repo
+          default-label: main
+          search-paths:
+            - '{application}'
+            - 'shared'
+          username: ${GIT_USERNAME:git-user}
+          password: ${GIT_PASSWORD:git-password}
+          force-pull: true
+          clone-on-start: true
+          refresh-rate: 30
+
+# 加密
+encrypt:
+  key: ${ENCRYPT_KEY:my-symmetric-secret-key-32chars!!}
+
+# Actuator
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,refresh,env,beans
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    org.springframework.cloud.config: INFO

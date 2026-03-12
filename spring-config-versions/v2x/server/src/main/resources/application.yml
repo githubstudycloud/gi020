@@ -1,0 +1,81 @@
+server:
+  port: 8888
+
+spring:
+  application:
+    name: config-server
+
+  # Spring Security 用户（2.x 统一在 spring.security 下配置）
+  security:
+    user:
+      name: admin
+      password: admin123
+
+  cloud:
+    config:
+      server:
+        # ===== Git 后端（支持 SSH key 认证）=====
+        git:
+          uri: https://github.com/yourorg/config-repo
+          default-label: main        # 2.x 开始推荐使用 main 分支
+          search-paths:
+            - '{application}'
+            - 'shared'
+          # HTTPS 用户名密码
+          username: ${GIT_USERNAME:git-user}
+          password: ${GIT_PASSWORD:git-password}
+          # SSH 私钥认证（与 username/password 二选一）
+          # private-key: |
+          #   -----BEGIN RSA PRIVATE KEY-----
+          #   ...
+          #   -----END RSA PRIVATE KEY-----
+          # known-hosts-file: /path/to/known_hosts
+          # strict-host-key-checking: false
+          force-pull: true
+          clone-on-start: true      # 启动时预先克隆（而非懒加载）
+          refresh-rate: 0           # 0=每次请求都从Git刷新；>0=缓存N秒
+
+        # ===== 复合后端（2.x 新增，多后端组合）=====
+        # composite:
+        #   - type: git
+        #     uri: https://github.com/yourorg/config-main
+        #   - type: native
+        #     search-locations: classpath:/override-configs
+
+        # ===== Vault 后端（2.x 新增）=====
+        # vault:
+        #   host: 127.0.0.1
+        #   port: 8200
+        #   scheme: http
+        #   backend: secret
+        #   default-key: application
+        #   profile-separator: ','
+        #   authentication: TOKEN
+        #   token: myroot
+
+# 加密配置（2.x 支持对称和非对称）
+encrypt:
+  key: my-symmetric-secret-key-here   # 对称加密
+
+# 非对称加密（RSA，生产推荐）：
+# encrypt:
+#   key-store:
+#     location: classpath:keystore.jks
+#     alias: mykey
+#     password: keystore-password
+#     secret: key-secret
+
+# Actuator 配置（2.x 路径变为 /actuator/*）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,refresh,bus-refresh
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    org.springframework.cloud.config: DEBUG
+    org.springframework.security: WARN

@@ -1,0 +1,23 @@
+# ============================================================
+# bootstrap.yml —— Spring Boot 2.x 客户端（2.3.x 及以下默认有效）
+# Spring Boot 2.4+ 需要引入 spring-cloud-starter-bootstrap 依赖
+# 或改用 application.yml 中的 spring.config.import 方式
+# ============================================================
+
+spring:
+  application:
+    name: myapp
+
+  cloud:
+    config:
+      uri: http://localhost:8888
+      profile: dev
+      label: main
+      username: admin
+      password: admin123
+      fail-fast: true
+      retry:
+        initial-interval: 1000
+        max-attempts: 6
+        max-interval: 2000
+        multiplier: 1.1

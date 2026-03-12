@@ -1,0 +1,51 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: myapp
+
+  profiles:
+    active: dev
+
+  # 4.x 虚拟线程
+  threads:
+    virtual:
+      enabled: true
+
+  # ============================================================
+  # 4.x 配置导入方式（与 3.x 相同，spring.config.import 是标准方式）
+  # ============================================================
+  config:
+    import:
+      - "optional:configserver:http://localhost:8888"
+      # 支持多个配置源：
+      # - "optional:configserver:http://localhost:8889"
+      # - "file:./local-override.yml"
+
+  cloud:
+    config:
+      uri: http://localhost:8888
+      username: admin
+      password: admin123
+      label: main
+      # 4.x 新增：支持配置文件扩展名指定
+      # media-type: application/yaml
+      retry:
+        initial-interval: 1000
+        max-attempts: 3
+
+# Actuator
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,refresh,env
+  endpoint:
+    health:
+      show-details: always
+
+# 本地默认
+app:
+  message: "Hello from local (4.x)"
+  version: "4.0"

@@ -1,0 +1,82 @@
+server:
+  port: 8888
+
+spring:
+  application:
+    name: config-server
+
+  cloud:
+    config:
+      server:
+        # ===== 方式一：Git 仓库后端（最常用）=====
+        git:
+          # 远程 Git 仓库地址（支持 http/https/ssh/file 协议）
+          uri: https://github.com/yourorg/config-repo
+          # 本地克隆缓存目录
+          basedir: /tmp/config-repo-cache
+          # 搜索路径（配置文件在仓库中的子目录）
+          search-paths:
+            - '{application}'   # 按应用名作为子目录
+            - 'shared'          # 共享配置目录
+          # 默认分支标签（1.x 默认 master）
+          default-label: master
+          # 私有仓库认证
+          username: git-user
+          password: git-password
+          # 强制拉取（防止本地缓存污染）
+          force-pull: true
+          # 克隆超时（毫秒）
+          timeout: 10
+
+          # 多仓库配置（按应用名路由）
+          repos:
+            # 匹配应用名以 order 开头的，使用专属仓库
+            order-service:
+              pattern: order-*
+              uri: https://github.com/yourorg/order-config
+              search-paths: config
+            # 匹配 payment 应用
+            payment-service:
+              pattern: payment-*
+              uri: https://github.com/yourorg/payment-config
+
+        # ===== 方式二：本地文件系统后端 =====
+        # native:
+        #   search-locations:
+        #     - classpath:/configs           # 打包进 jar
+        #     - file:///D:/configs           # 外部目录
+        #     - file://${user.home}/configs
+
+        # ===== 方式三：SVN 后端 =====
+        # svn:
+        #   uri: svn://localhost/config-repo
+        #   username: svn-user
+        #   password: svn-pass
+        #   default-label: trunk
+
+        # 加密/解密支持（对称加密）
+        encrypt:
+          enabled: true
+
+# 1.x 中 Security 配置：保护 /encrypt, /decrypt 等敏感端点
+security:
+  user:
+    name: admin
+    password: admin123
+  # 注意：1.x 的 actuator 端点默认受保护
+  basic:
+    enabled: true
+
+# Actuator 端点（1.x 默认路径 /health, /info 等）
+management:
+  security:
+    enabled: false   # 开发时关闭 actuator 安全验证
+
+# 加密密钥配置（对称加密，生产建议用非对称）
+encrypt:
+  key: my-symmetric-secret-key-32chars!!
+
+# 日志配置
+logging:
+  level:
+    org.springframework.cloud.config: DEBUG

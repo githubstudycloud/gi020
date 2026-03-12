@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>config-server-v4x</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>Spring Cloud Config Server (Boot 4.x)</name>
+
+    <!--
+        Spring Boot 4.x 与 Spring Cloud 版本对应：
+          Boot 4.0.x → Cloud 2024.0.x (Moorgate)
+          要求 Java 21+（最低支持 Java 17，推荐 21）
+          Spring Framework 7.x
+
+        注意：截至 2025 年，Spring Boot 4.0 仍处于里程碑/快照阶段
+        生产环境建议使用 3.x 稳定版
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.0.0</version>
+        <relativePath/>
+    </parent>
+
+    <properties>
+        <java.version>21</java.version>
+        <spring-cloud.version>2024.0.0</spring-cloud.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-config-server</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <!-- 4.x 支持 GraalVM 原生镜像编译 -->
+                <configuration>
+                    <image>
+                        <name>${project.artifactId}:${project.version}</name>
+                    </image>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

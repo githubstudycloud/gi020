@@ -1,0 +1,47 @@
+server:
+  port: 8888
+
+spring:
+  application:
+    name: config-server
+
+  security:
+    user:
+      name: admin
+      password: admin123
+
+  cloud:
+    config:
+      server:
+        git:
+          uri: https://github.com/yourorg/config-repo
+          default-label: main
+          search-paths:
+            - '{application}'
+            - 'shared'
+          username: ${GIT_USERNAME:git-user}
+          password: ${GIT_PASSWORD:git-password}
+          force-pull: true
+          clone-on-start: true
+          refresh-rate: 30      # 缓存30秒，避免频繁请求 Git
+
+          # 3.x 新增：支持 JGit 传输配置
+          timeout: 5
+
+# 加密配置
+encrypt:
+  key: ${ENCRYPT_KEY:my-symmetric-secret-key-32chars!!}
+
+# Actuator
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,refresh,env
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    org.springframework.cloud.config: INFO

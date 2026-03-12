@@ -1,0 +1,11 @@
+# ============================================================
+# myapp 的默认配置（所有 profile 共用）
+# 文件名：myapp.yml（对应 spring.application.name=myapp）
+# ============================================================
+
+app:
+  message: "Hello from Config Server (default)"
+  version: "1.0.0"
+  feature-flags:
+    new-ui: false
+    dark-mode: false

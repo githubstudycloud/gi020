@@ -1,0 +1,31 @@
+server:
+  port: 8080
+
+# ============================================================
+# Spring Boot 2.4+ 新方式：使用 spring.config.import
+# 不再依赖 bootstrap.yml，直接在 application.yml 中导入
+# 使用此方式时可以删除 bootstrap.yml 并移除 spring-cloud-starter-bootstrap 依赖
+# ============================================================
+# spring:
+#   application:
+#     name: myapp
+#   config:
+#     import: "optional:configserver:http://admin:admin123@localhost:8888"
+#   profiles:
+#     active: dev
+#   cloud:
+#     config:
+#       label: main
+#       fail-fast: true
+
+# Actuator（2.x 路径为 /actuator/refresh）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,refresh
+
+# 本地默认配置
+app:
+  message: "Hello from local"
+  version: "2.0"
