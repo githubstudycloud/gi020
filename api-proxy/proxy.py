@@ -58,6 +58,9 @@ TARGET_API_BASE_URL = os.getenv(
     "https://your-target-api.example.com"                # ← 改为实际目标接口基础地址
 )
 
+# 目标接口鉴权 Header 字段名（默认 Auth，按实际接口要求修改）
+AUTH_HEADER_NAME = os.getenv("AUTH_HEADER_NAME", "Auth")  # ← 改为实际 Header 字段名，如 Authorization、X-Token 等
+
 # ── 代理服务监听配置 ──────────────────────────────────────────
 PROXY_HOST = os.getenv("PROXY_HOST", "0.0.0.0")         # 0.0.0.0 允许外部访问
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8080"))        # ← 改为期望监听的端口
@@ -130,7 +133,7 @@ class TokenManager:
         }
         logger.info("正在刷新 Token，接口: %s", TOKEN_API_URL)
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=False, trust_env=False) as client:
                 if TOKEN_REQUEST_TYPE == "form":
                     resp = await client.post(TOKEN_API_URL, data=payload)
                 else:
@@ -215,7 +218,7 @@ def _build_forward_headers(request: Request, token: str) -> dict:
         for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP
     }
-    headers["Auth"] = token  # ← 注入 Auth Token
+    headers[AUTH_HEADER_NAME] = token  # ← 注入 Auth Token（字段名由 AUTH_HEADER_NAME 配置）
     return headers
 
 
@@ -268,7 +271,7 @@ async def _proxy_normal(
     method: str, url: str, headers: dict, body: bytes
 ) -> Response:
     """转发普通请求，返回完整响应"""
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True, verify=False, trust_env=False) as client:
         resp = await client.request(
             method=method, url=url, headers=headers, content=body
         )
@@ -291,6 +294,8 @@ async def _proxy_stream(
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0),
             follow_redirects=True,
+            verify=False,
+            trust_env=False,
         ) as client:
             async with client.stream(
                 method=method, url=url, headers=headers, content=body

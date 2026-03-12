@@ -23,6 +23,7 @@
 | `TOKEN_PARAM_2_NAME`     | 第二个参数名                       | `password`                                     |
 | `TOKEN_PARAM_2_VALUE`    | 第二个参数值                       | `secret123`                                    |
 | `TARGET_API_BASE_URL`    | 目标 API 基础地址（被代理的接口）   | `https://ai.example.com`                       |
+| `AUTH_HEADER_NAME`       | 注入 Token 的 Header 字段名        | `Auth`、`Authorization`、`X-Token` 等          |
 | `PROXY_HOST`             | 代理监听 IP（默认 `0.0.0.0`）      | `0.0.0.0`                                      |
 | `PROXY_PORT`             | 代理监听端口（默认 `8080`）         | `8080`                                         |
 | `TOKEN_REFRESH_INTERVAL` | Token 刷新间隔秒数（默认 `1800`）  | `1800`                                         |
@@ -79,6 +80,7 @@ TOKEN_PARAM_1_VALUE=admin
 TOKEN_PARAM_2_NAME=password
 TOKEN_PARAM_2_VALUE=secret123
 TARGET_API_BASE_URL=https://ai.example.com
+AUTH_HEADER_NAME=Auth
 PROXY_HOST=0.0.0.0
 PROXY_PORT=8080
 TOKEN_REFRESH_INTERVAL=1800
@@ -217,6 +219,7 @@ TOKEN_PARAM_1_VALUE=admin
 TOKEN_PARAM_2_NAME=password
 TOKEN_PARAM_2_VALUE=secret123
 TARGET_API_BASE_URL=https://ai.example.com
+AUTH_HEADER_NAME=Auth
 PROXY_HOST=0.0.0.0
 PROXY_PORT=8080
 TOKEN_REFRESH_INTERVAL=1800
