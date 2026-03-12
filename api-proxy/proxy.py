@@ -65,8 +65,9 @@ AUTH_HEADER_NAME = os.getenv("AUTH_HEADER_NAME", "Auth")  # ← 改为实际 Hea
 PROXY_HOST = os.getenv("PROXY_HOST", "0.0.0.0")         # 0.0.0.0 允许外部访问
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8080"))        # ← 改为期望监听的端口
 
-# 对外暴露的本地路径（外部按此路径访问，形如 ChatGPT 接口）
-LOCAL_API_PATH = os.getenv("LOCAL_API_PATH", "/v1/chat/completions")  # ← 可按需修改
+# 对外暴露的路径前缀（该前缀下所有路径均转发到 TARGET_API_URL）
+# 默认 /v1，支持 /v1/chat/completions、/v1/responses 等所有 /v1/* 路径
+LOCAL_API_PREFIX = os.getenv("LOCAL_API_PREFIX", "/v1")  # ← 可按需修改
 
 # ── Token 刷新间隔 ────────────────────────────────────────────
 TOKEN_REFRESH_INTERVAL = int(os.getenv("TOKEN_REFRESH_INTERVAL", str(30 * 60)))  # 默认 30 分钟
@@ -181,7 +182,7 @@ async def on_startup() -> None:
     logger.info("=" * 60)
     logger.info("API 代理服务启动")
     logger.info("目标接口: %s", TARGET_API_URL)
-    logger.info("本地路径: %s", LOCAL_API_PATH)
+    logger.info("本地前缀: %s/*  (支持 /chat/completions、/responses 等)", LOCAL_API_PREFIX)
     logger.info("Token 刷新间隔: %d 秒", TOKEN_REFRESH_INTERVAL)
     logger.info("监听地址: %s:%d", PROXY_HOST, PROXY_PORT)
     logger.info("=" * 60)
@@ -216,13 +217,15 @@ def _detect_stream(body: bytes) -> bool:
 
 
 def _build_forward_headers(request: Request, token: str) -> dict:
-    """构造转发请求头：过滤 hop-by-hop，注入 Auth Token"""
+    """构造转发请求头：过滤 hop-by-hop，强制用内部 Token 覆盖同名鉴权字段"""
+    auth_key_lower = AUTH_HEADER_NAME.lower()
     headers = {
         k: v
         for k, v in request.headers.items()
-        if k.lower() not in _HOP_BY_HOP
+        # 过滤 hop-by-hop，同时剔除外部传入的同名鉴权字段（无论大小写），防止外部 token 透传
+        if k.lower() not in _HOP_BY_HOP and k.lower() != auth_key_lower
     }
-    headers[AUTH_HEADER_NAME] = token  # ← 注入 Auth Token（字段名由 AUTH_HEADER_NAME 配置）
+    headers[AUTH_HEADER_NAME] = token  # 注入内部管理的 Token，始终覆盖外部传值
     return headers
 
 
@@ -235,12 +238,15 @@ def _build_resp_headers(resp: httpx.Response) -> dict:
     }
 
 
-# ── 代理路由（固定对外路径，转发到完整目标 URL）──────────────
+# ── 代理路由（LOCAL_API_PREFIX/* 均转发到完整目标 URL）────────
+# 例: /v1/chat/completions、/v1/responses、/v1/embeddings ... 全部命中
 @app.api_route(
-    LOCAL_API_PATH,
+    LOCAL_API_PREFIX.rstrip("/") + "/{rest_path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
 )
-async def proxy_handler(request: Request) -> Response:
+async def proxy_handler(request: Request, rest_path: str) -> Response:
+    local_path = f"{LOCAL_API_PREFIX.rstrip('/')}/{rest_path}"
+
     # 1. 获取有效 Token
     token = await token_manager.get_token()
 
@@ -250,7 +256,7 @@ async def proxy_handler(request: Request) -> Response:
     if query_string:
         target_url += f"?{query_string}"
 
-    # 3. 构造请求头
+    # 3. 构造请求头（外部同名鉴权字段已被剔除，内部 Token 强制注入）
     forward_headers = _build_forward_headers(request, token)
 
     # 4. 读取请求体
@@ -260,8 +266,8 @@ async def proxy_handler(request: Request) -> Response:
     is_stream = _detect_stream(body)
 
     logger.info(
-        "→ %s %s | stream=%s | body=%d bytes",
-        request.method, LOCAL_API_PATH, is_stream, len(body),
+        "→ %s %s → %s | stream=%s | body=%d bytes",
+        request.method, local_path, target_url, is_stream, len(body),
     )
 
     # 6. 转发
@@ -332,7 +338,7 @@ async def health() -> dict:
         "token_age_seconds": age,
         "refresh_interval_seconds": TOKEN_REFRESH_INTERVAL,
         "target": TARGET_API_URL,
-        "local_path": LOCAL_API_PATH,
+        "local_prefix": LOCAL_API_PREFIX,
     }
 
 

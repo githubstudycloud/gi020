@@ -24,7 +24,7 @@
 | `TOKEN_PARAM_2_VALUE`    | 第二个参数值                       | `secret123`                                    |
 | `TARGET_API_URL`         | 第二个接口的**完整地址**（直接转发，不拼接路径） | `https://ai.example.com/api/chat/send` |
 | `AUTH_HEADER_NAME`       | 注入 Token 的 Header 字段名        | `Auth`、`Authorization`、`X-Token` 等          |
-| `LOCAL_API_PATH`         | 对外暴露的本地路径（ChatGPT 风格） | `/v1/chat/completions`                         |
+| `LOCAL_API_PREFIX`       | 对外暴露的路径前缀，前缀下所有路径均被代理 | `/v1`（支持 `/v1/chat/completions`、`/v1/responses` 等） |
 | `PROXY_HOST`             | 代理监听 IP（默认 `0.0.0.0`）      | `0.0.0.0`                                      |
 | `PROXY_PORT`             | 代理监听端口（默认 `8080`）         | `8080`                                         |
 | `TOKEN_REFRESH_INTERVAL` | Token 刷新间隔秒数（默认 `1800`）  | `1800`                                         |
@@ -81,7 +81,7 @@ TOKEN_PARAM_1_VALUE=admin
 TOKEN_PARAM_2_NAME=password
 TOKEN_PARAM_2_VALUE=secret123
 TARGET_API_URL=https://ai.example.com/api/chat/send
-LOCAL_API_PATH=/v1/chat/completions
+LOCAL_API_PREFIX=/v1
 AUTH_HEADER_NAME=Auth
 PROXY_HOST=0.0.0.0
 PROXY_PORT=8080
@@ -221,7 +221,7 @@ TOKEN_PARAM_1_VALUE=admin
 TOKEN_PARAM_2_NAME=password
 TOKEN_PARAM_2_VALUE=secret123
 TARGET_API_URL=https://ai.example.com/api/chat/send
-LOCAL_API_PATH=/v1/chat/completions
+LOCAL_API_PREFIX=/v1
 AUTH_HEADER_NAME=Auth
 PROXY_HOST=0.0.0.0
 PROXY_PORT=8080
@@ -268,7 +268,7 @@ C:\tools\nssm\win64\nssm.exe set ApiProxy AppEnvironmentExtra `
   "TOKEN_PARAM_2_NAME=password" `
   "TOKEN_PARAM_2_VALUE=secret123" `
   "TARGET_API_URL=https://ai.example.com/api/chat/send" `
-  "LOCAL_API_PATH=/v1/chat/completions" `
+  "LOCAL_API_PREFIX=/v1" `
   "PROXY_PORT=8080"
 
 # 配置日志
