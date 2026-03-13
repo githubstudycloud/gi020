@@ -65,9 +65,8 @@ AUTH_HEADER_NAME = os.getenv("AUTH_HEADER_NAME", "Auth")  # ← 改为实际 Hea
 PROXY_HOST = os.getenv("PROXY_HOST", "0.0.0.0")         # 0.0.0.0 允许外部访问
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8080"))        # ← 改为期望监听的端口
 
-# 对外暴露的路径前缀（该前缀下所有路径均转发到 TARGET_API_URL）
-# 默认 /v1，支持 /v1/chat/completions、/v1/responses 等所有 /v1/* 路径
-LOCAL_API_PREFIX = os.getenv("LOCAL_API_PREFIX", "/v1")  # ← 可按需修改
+# 对外暴露的固定路径（仅这两个路径接收请求并转发）
+LOCAL_PATHS = ["/v1/chat/completions", "/v1/responses"]
 
 # ── Token 刷新间隔 ────────────────────────────────────────────
 TOKEN_REFRESH_INTERVAL = int(os.getenv("TOKEN_REFRESH_INTERVAL", str(30 * 60)))  # 默认 30 分钟
@@ -182,7 +181,7 @@ async def on_startup() -> None:
     logger.info("=" * 60)
     logger.info("API 代理服务启动")
     logger.info("目标接口: %s", TARGET_API_URL)
-    logger.info("本地前缀: %s/*  (支持 /chat/completions、/responses 等)", LOCAL_API_PREFIX)
+    logger.info("对外路径: %s", ", ".join(LOCAL_PATHS))
     logger.info("Token 刷新间隔: %d 秒", TOKEN_REFRESH_INTERVAL)
     logger.info("监听地址: %s:%d", PROXY_HOST, PROXY_PORT)
     logger.info("=" * 60)
@@ -238,15 +237,36 @@ def _build_resp_headers(resp: httpx.Response) -> dict:
     }
 
 
-# ── 代理路由（LOCAL_API_PREFIX/* 均转发到完整目标 URL）────────
-# 例: /v1/chat/completions、/v1/responses、/v1/embeddings ... 全部命中
-@app.api_route(
-    LOCAL_API_PREFIX.rstrip("/") + "/{rest_path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-)
-async def proxy_handler(request: Request, rest_path: str) -> Response:
-    local_path = f"{LOCAL_API_PREFIX.rstrip('/')}/{rest_path}"
+def _log_messages(body: bytes, local_path: str) -> None:
+    """打印请求中的 model 和 messages 内容，便于排查实际发出的消息"""
+    if not body:
+        return
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return
+    model = data.get("model", "-")
+    messages = data.get("messages") or data.get("input") or []
+    logger.info("  path=%s  model=%s  messages=%d 条", local_path, model, len(messages))
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "?")
+        content = msg.get("content", "")
+        # content 可能是字符串或列表（多模态）
+        if isinstance(content, list):
+            text = " ".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        else:
+            text = str(content)
+        # 截断过长内容，避免日志刷屏
+        preview = text[:200].replace("\n", "\\n")
+        if len(text) > 200:
+            preview += f"…(+{len(text) - 200})"
+        logger.info("  [%d] %s: %s", i, role, preview)
 
+
+# ── 代理路由（仅 /v1/chat/completions 和 /v1/responses）────────
+async def _proxy_handler(request: Request, local_path: str) -> Response:
     # 1. 获取有效 Token
     token = await token_manager.get_token()
 
@@ -269,12 +289,24 @@ async def proxy_handler(request: Request, rest_path: str) -> Response:
         "→ %s %s → %s | stream=%s | body=%d bytes",
         request.method, local_path, target_url, is_stream, len(body),
     )
+    # 打印实际发出的消息内容
+    _log_messages(body, local_path)
 
     # 6. 转发
     if is_stream:
         return await _proxy_stream(request.method, target_url, forward_headers, body)
     else:
         return await _proxy_normal(request.method, target_url, forward_headers, body)
+
+
+@app.api_route("/v1/chat/completions", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def chat_completions(request: Request) -> Response:
+    return await _proxy_handler(request, "/v1/chat/completions")
+
+
+@app.api_route("/v1/responses", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def responses(request: Request) -> Response:
+    return await _proxy_handler(request, "/v1/responses")
 
 
 async def _proxy_normal(
@@ -338,7 +370,7 @@ async def health() -> dict:
         "token_age_seconds": age,
         "refresh_interval_seconds": TOKEN_REFRESH_INTERVAL,
         "target": TARGET_API_URL,
-        "local_prefix": LOCAL_API_PREFIX,
+        "local_paths": LOCAL_PATHS,
     }
 
 
