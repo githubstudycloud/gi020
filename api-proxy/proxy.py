@@ -239,6 +239,26 @@ def _build_resp_headers(resp: httpx.Response) -> dict:
 
 # ── Responses API ↔ Chat Completions 格式转换 ─────────────────
 
+def _extract_content(content) -> str:
+    """
+    将 Responses API 的 content 字段统一转为字符串。
+    支持两种形式:
+      - 字符串: 直接返回
+      - 数组:   提取 type=="input_text" 的 text 字段并拼接
+        例: [{"type": "input_text", "text": "hello"}, ...]  →  "hello"
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "input_text"
+        ]
+        return "\n".join(parts)
+    return str(content) if content else ""
+
+
 def _responses_to_chat_body(data: dict) -> dict:
     """
     OpenAI Responses API 请求体 → Chat Completions 请求体
@@ -276,7 +296,7 @@ def _responses_to_chat_body(data: dict) -> dict:
             if isinstance(item, dict):
                 messages.append({
                     "role": item.get("role", "user"),
-                    "content": item.get("content", ""),
+                    "content": _extract_content(item.get("content", "")),
                 })
 
     out["messages"] = messages
