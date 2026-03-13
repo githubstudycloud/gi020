@@ -493,17 +493,21 @@ async def _proxy_handler(request: Request, local_path: str) -> Response:
     body = await request.body()
 
     # 5. /v1/responses → 转换为 chat completions 格式再转发
+    original_body = body
     if is_responses and body:
         try:
             req_data = json.loads(body)
+            logger.info("  [RAW REQUEST BODY]\n%s",
+                        json.dumps(req_data, ensure_ascii=False, indent=2))
             chat_data = _responses_to_chat_body(req_data)
             body = json.dumps(chat_data, ensure_ascii=False).encode("utf-8")
             forward_headers["content-type"] = "application/json"
             forward_headers["content-length"] = str(len(body))
-            logger.info("  [responses→chat] 请求体已转换，原 %d bytes → %d bytes",
-                        len(await request.body()), len(body))
+            logger.info("  [CONVERTED REQUEST BODY]\n%s",
+                        json.dumps(chat_data, ensure_ascii=False, indent=2))
         except Exception as exc:
             logger.warning("  [responses→chat] 转换失败，原样转发: %s", exc)
+            logger.warning("  [RAW REQUEST BODY raw bytes] %s", original_body[:500])
 
     # 6. 判断是否流式（转换后的 body）
     is_stream = _detect_stream(body)
@@ -512,18 +516,24 @@ async def _proxy_handler(request: Request, local_path: str) -> Response:
         "→ %s %s → %s | stream=%s | body=%d bytes",
         request.method, local_path, target_url, is_stream, len(body),
     )
+    logger.info("  [FORWARD HEADERS] %s",
+                {k: v for k, v in forward_headers.items() if k.lower() != AUTH_HEADER_NAME.lower()})
     _log_messages(body, local_path)
 
     # 7. 转发
     if is_stream:
         if is_responses:
-            # 流式：经过 SSE 格式转换再返回给调用方
             return _stream_responses_response(request.method, target_url, forward_headers, body)
         return await _proxy_stream(request.method, target_url, forward_headers, body)
     else:
         resp = await _proxy_normal(request.method, target_url, forward_headers, body)
+        # 无论状态码，都打印响应体便于排查
+        try:
+            resp_text = resp.body.decode("utf-8", errors="replace")
+            logger.info("  [RESPONSE %d] %s", resp.status_code, resp_text[:2000])
+        except Exception:
+            pass
         if is_responses and resp.status_code == 200:
-            # 非流式：chat 响应体 → responses 响应体
             try:
                 chat_resp = json.loads(resp.body)
                 responses_resp = _chat_to_responses_body(chat_resp)
@@ -585,6 +595,10 @@ async def _proxy_normal(
         )
 
     logger.info("← %d %s", resp.status_code, url)
+    if resp.status_code >= 400:
+        logger.error("  [ERROR RESPONSE %d] headers=%s body=%s",
+                     resp.status_code, dict(resp.headers),
+                     resp.text[:2000])
     return Response(
         content=resp.content,
         status_code=resp.status_code,
