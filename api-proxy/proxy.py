@@ -244,16 +244,19 @@ def _extract_content(content) -> str:
     将 Responses API 的 content 字段统一转为字符串。
     支持两种形式:
       - 字符串: 直接返回
-      - 数组:   提取 type=="input_text" 的 text 字段并拼接
-        例: [{"type": "input_text", "text": "hello"}, ...]  →  "hello"
+      - 数组:   提取文本类 part 的 text 字段并拼接
+        user/system 消息用 input_text，assistant 历史消息用 output_text
+        例: [{"type": "input_text",  "text": "hello"}]  →  "hello"
+            [{"type": "output_text", "text": "world"}]  →  "world"
     """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        TEXT_TYPES = {"input_text", "output_text"}
         parts = [
             part.get("text", "")
             for part in content
-            if isinstance(part, dict) and part.get("type") == "input_text"
+            if isinstance(part, dict) and part.get("type") in TEXT_TYPES
         ]
         return "\n".join(parts)
     return str(content) if content else ""
