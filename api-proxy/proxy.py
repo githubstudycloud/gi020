@@ -271,9 +271,10 @@ def _responses_to_chat_body(data: dict) -> dict:
     """
     out: dict = {}
 
-    # 通用字段直接透传
+    # 通用字段直接透传（含工具调用相关字段）
     for k in ("model", "stream", "temperature", "top_p", "n",
-              "stop", "presence_penalty", "frequency_penalty", "user"):
+              "stop", "presence_penalty", "frequency_penalty", "user",
+              "tools", "tool_choice", "parallel_tool_calls"):
         if k in data:
             out[k] = data[k]
 
@@ -309,13 +310,50 @@ def _responses_to_chat_body(data: dict) -> dict:
 def _chat_to_responses_body(data: dict) -> dict:
     """
     Chat Completions 响应体 → Responses API 响应体（非流式）
+    支持: 普通文本、reasoning_content、tool_calls
     """
     choice = (data.get("choices") or [{}])[0]
-    text = (choice.get("message") or {}).get("content") or ""
+    message = choice.get("message") or {}
+    text = message.get("content") or ""
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+    tool_calls = message.get("tool_calls") or []
     usage = data.get("usage") or {}
 
     rid = data.get("id") or ""
     resp_id = f"resp_{rid}" if rid and not rid.startswith("resp_") else (rid or f"resp_{int(time.time())}")
+
+    output: list = []
+
+    # 1. reasoning → reasoning 输出项
+    if reasoning:
+        output.append({
+            "id": "rs_001",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": reasoning}],
+        })
+
+    # 2. 文本内容（有 content 时，或没有 tool_calls 时保留空消息）
+    if text or not tool_calls:
+        output.append({
+            "id": "msg_001",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        })
+
+    # 3. tool_calls → function_call 输出项
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        tc_id = tc.get("id") or f"call_{len(output)}"
+        output.append({
+            "type": "function_call",
+            "id": tc_id,
+            "call_id": tc_id,
+            "name": fn.get("name", ""),
+            "arguments": fn.get("arguments", "{}"),
+        })
 
     return {
         "id": resp_id,
@@ -323,13 +361,7 @@ def _chat_to_responses_body(data: dict) -> dict:
         "created_at": data.get("created", int(time.time())),
         "status": "completed",
         "model": data.get("model", ""),
-        "output": [{
-            "id": "msg_001",
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": text, "annotations": []}],
-        }],
+        "output": output,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
@@ -359,21 +391,29 @@ async def _responses_stream_adapter(
     source: AsyncIterator[bytes],
 ) -> AsyncIterator[bytes]:
     """
-    将 Chat Completions SSE 流逐块转换为 Responses API SSE 事件流。
-    Chat 格式: data: {"choices":[{"delta":{"content":"..."}}]}
-    Responses 格式: event: response.output_text.delta / response.done 等
+    将 Chat Completions SSE 流转换为 Responses API SSE 事件流。
+    支持: 普通 delta.content、GLM delta.reasoning_content/reasoning、delta.tool_calls
     """
     resp_id = f"resp_{int(time.time())}"
     item_id = "msg_001"
     model = ""
     full_text = ""
+    full_reasoning = ""
     usage: dict = {}
-    started = False
+
+    started = False           # response.created 已发
+    reasoning_started = False # reasoning 输出项已开启
+    text_started = False      # message 输出项已开启
+    text_output_index = 0     # message 输出项的 output_index（在 text_started 置 True 时确定）
+
+    # tool_calls 状态: {stream_index: {id, item_id, name, arguments, output_index}}
+    tool_calls_map: dict = {}
+    next_output_index = 0     # 下一个可用的 output_index
+
     buf = b""
 
     async for raw in source:
         buf += raw
-        # SSE 事件之间以 \n\n 分隔
         while b"\n\n" in buf:
             block, buf = buf.split(b"\n\n", 1)
             for line in block.splitlines():
@@ -382,30 +422,91 @@ async def _responses_stream_adapter(
                     continue
                 payload = line[5:].strip().decode("utf-8", errors="replace")
 
+                # ── [DONE] 收尾 ────────────────────────────────────
                 if payload == "[DONE]":
-                    yield _sse("response.output_text.done", {
-                        "type": "response.output_text.done",
-                        "item_id": item_id, "output_index": 0, "content_index": 0,
-                        "text": full_text,
-                    })
-                    yield _sse("response.output_item.done", {
-                        "type": "response.output_item.done", "output_index": 0,
-                        "item": {
+                    # 关闭 reasoning 项
+                    if reasoning_started:
+                        yield _sse("response.reasoning_summary_text.done", {
+                            "type": "response.reasoning_summary_text.done",
+                            "item_id": "rs_001", "output_index": 0,
+                            "summary_index": 0, "text": full_reasoning,
+                        })
+                        yield _sse("response.reasoning_summary_part.done", {
+                            "type": "response.reasoning_summary_part.done",
+                            "item_id": "rs_001", "output_index": 0, "summary_index": 0,
+                            "part": {"type": "summary_text", "text": full_reasoning},
+                        })
+                        yield _sse("response.output_item.done", {
+                            "type": "response.output_item.done", "output_index": 0,
+                            "item": {
+                                "id": "rs_001", "type": "reasoning", "status": "completed",
+                                "summary": [{"type": "summary_text", "text": full_reasoning}],
+                            },
+                        })
+
+                    # 关闭文本消息项
+                    if text_started:
+                        yield _sse("response.output_text.done", {
+                            "type": "response.output_text.done",
+                            "item_id": item_id, "output_index": text_output_index,
+                            "content_index": 0, "text": full_text,
+                        })
+                        yield _sse("response.output_item.done", {
+                            "type": "response.output_item.done",
+                            "output_index": text_output_index,
+                            "item": {
+                                "id": item_id, "type": "message", "role": "assistant",
+                                "status": "completed",
+                                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                            },
+                        })
+
+                    # 关闭所有 tool_call 项
+                    for tc in sorted(tool_calls_map.values(), key=lambda x: x["output_index"]):
+                        yield _sse("response.function_call_arguments.done", {
+                            "type": "response.function_call_arguments.done",
+                            "item_id": tc["item_id"],
+                            "output_index": tc["output_index"],
+                            "call_id": tc["id"],
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        })
+                        yield _sse("response.output_item.done", {
+                            "type": "response.output_item.done",
+                            "output_index": tc["output_index"],
+                            "item": {
+                                "type": "function_call",
+                                "id": tc["id"], "call_id": tc["id"],
+                                "name": tc["name"], "arguments": tc["arguments"],
+                            },
+                        })
+
+                    # 构建 response.done 的 output 列表
+                    done_output: list = []
+                    if reasoning_started:
+                        done_output.append({
+                            "id": "rs_001", "type": "reasoning", "status": "completed",
+                            "summary": [{"type": "summary_text", "text": full_reasoning}],
+                        })
+                    if text_started:
+                        done_output.append({
                             "id": item_id, "type": "message", "role": "assistant",
                             "status": "completed",
                             "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-                        },
-                    })
+                        })
+                    for tc in sorted(tool_calls_map.values(), key=lambda x: x["output_index"]):
+                        done_output.append({
+                            "type": "function_call",
+                            "id": tc["id"], "call_id": tc["id"],
+                            "name": tc["name"], "arguments": tc["arguments"],
+                        })
+
                     yield _sse("response.done", {
                         "type": "response.done",
                         "response": {
                             "id": resp_id, "object": "response", "status": "completed",
                             "model": model, "created_at": int(time.time()),
-                            "output": [{
-                                "id": item_id, "type": "message", "role": "assistant",
-                                "status": "completed",
-                                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-                            }],
+                            "output": done_output,
                             "usage": {
                                 "input_tokens": usage.get("prompt_tokens", 0),
                                 "output_tokens": usage.get("completion_tokens", 0),
@@ -421,7 +522,7 @@ async def _responses_stream_adapter(
                 except json.JSONDecodeError:
                     continue
 
-                # 第一个有效 chunk：发送 created / output_item.added / content_part.added
+                # 第一个有效 chunk：发 response.created
                 if not started:
                     model = chunk.get("model", "")
                     cid = chunk.get("id", "")
@@ -434,31 +535,103 @@ async def _responses_stream_adapter(
                             "output": [], "usage": None,
                         },
                     })
-                    yield _sse("response.output_item.added", {
-                        "type": "response.output_item.added", "output_index": 0,
-                        "item": {"id": item_id, "type": "message",
-                                 "role": "assistant", "content": [], "status": "in_progress"},
-                    })
-                    yield _sse("response.content_part.added", {
-                        "type": "response.content_part.added",
-                        "item_id": item_id, "output_index": 0, "content_index": 0,
-                        "part": {"type": "output_text", "text": "", "annotations": []},
-                    })
                     started = True
 
-                # 增量文本
                 choices = chunk.get("choices") or []
-                if choices:
-                    delta_content = (choices[0].get("delta") or {}).get("content") or ""
-                    if delta_content:
-                        full_text += delta_content
-                        yield _sse("response.output_text.delta", {
-                            "type": "response.output_text.delta",
-                            "item_id": item_id, "output_index": 0, "content_index": 0,
-                            "delta": delta_content,
+                if not choices:
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+                    continue
+
+                delta = choices[0].get("delta") or {}
+
+                # ── Reasoning（GLM: reasoning_content / reasoning）────
+                reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if reasoning_delta:
+                    if not reasoning_started:
+                        yield _sse("response.output_item.added", {
+                            "type": "response.output_item.added", "output_index": next_output_index,
+                            "item": {"id": "rs_001", "type": "reasoning",
+                                     "status": "in_progress", "summary": []},
+                        })
+                        yield _sse("response.reasoning_summary_part.added", {
+                            "type": "response.reasoning_summary_part.added",
+                            "item_id": "rs_001", "output_index": next_output_index,
+                            "summary_index": 0, "part": {"type": "summary_text", "text": ""},
+                        })
+                        next_output_index += 1
+                        reasoning_started = True
+                    full_reasoning += reasoning_delta
+                    yield _sse("response.reasoning_summary_text.delta", {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": "rs_001", "output_index": next_output_index - 1,
+                        "summary_index": 0, "delta": reasoning_delta,
+                    })
+
+                # ── 普通文本 delta.content ────────────────────────────
+                content_delta = delta.get("content") or ""
+                if content_delta:
+                    if not text_started:
+                        text_output_index = next_output_index
+                        next_output_index += 1
+                        yield _sse("response.output_item.added", {
+                            "type": "response.output_item.added",
+                            "output_index": text_output_index,
+                            "item": {"id": item_id, "type": "message", "role": "assistant",
+                                     "content": [], "status": "in_progress"},
+                        })
+                        yield _sse("response.content_part.added", {
+                            "type": "response.content_part.added",
+                            "item_id": item_id, "output_index": text_output_index,
+                            "content_index": 0,
+                            "part": {"type": "output_text", "text": "", "annotations": []},
+                        })
+                        text_started = True
+                    full_text += content_delta
+                    yield _sse("response.output_text.delta", {
+                        "type": "response.output_text.delta",
+                        "item_id": item_id, "output_index": text_output_index,
+                        "content_index": 0, "delta": content_delta,
+                    })
+
+                # ── Tool calls delta ──────────────────────────────────
+                for tc_delta in (delta.get("tool_calls") or []):
+                    tc_idx = tc_delta.get("index", 0)
+                    if tc_idx not in tool_calls_map:
+                        tc_id = tc_delta.get("id") or f"call_{tc_idx}"
+                        tc_item_id = f"fc_{tc_id}"
+                        tc_out_idx = next_output_index
+                        next_output_index += 1
+                        tool_calls_map[tc_idx] = {
+                            "id": tc_id, "item_id": tc_item_id,
+                            "name": (tc_delta.get("function") or {}).get("name", ""),
+                            "arguments": "", "output_index": tc_out_idx,
+                        }
+                        yield _sse("response.output_item.added", {
+                            "type": "response.output_item.added",
+                            "output_index": tc_out_idx,
+                            "item": {
+                                "type": "function_call",
+                                "id": tc_id, "call_id": tc_id,
+                                "name": tool_calls_map[tc_idx]["name"], "arguments": "",
+                            },
+                        })
+                    # 后续 chunk 可能补全 name
+                    fn_name = (tc_delta.get("function") or {}).get("name", "")
+                    if fn_name:
+                        tool_calls_map[tc_idx]["name"] = fn_name
+                    # arguments 增量
+                    args_delta = (tc_delta.get("function") or {}).get("arguments", "")
+                    if args_delta:
+                        tool_calls_map[tc_idx]["arguments"] += args_delta
+                        yield _sse("response.function_call_arguments.delta", {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": tool_calls_map[tc_idx]["item_id"],
+                            "output_index": tool_calls_map[tc_idx]["output_index"],
+                            "call_id": tool_calls_map[tc_idx]["id"],
+                            "delta": args_delta,
                         })
 
-                # 记录 usage（部分上游会在最后一个 chunk 里带）
                 if chunk.get("usage"):
                     usage = chunk["usage"]
 
