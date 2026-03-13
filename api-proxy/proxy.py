@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import time
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -237,8 +237,211 @@ def _build_resp_headers(resp: httpx.Response) -> dict:
     }
 
 
+# ── Responses API ↔ Chat Completions 格式转换 ─────────────────
+
+def _responses_to_chat_body(data: dict) -> dict:
+    """
+    OpenAI Responses API 请求体 → Chat Completions 请求体
+    主要差异:
+      input / instructions → messages
+      max_output_tokens    → max_tokens
+    """
+    out: dict = {}
+
+    # 通用字段直接透传
+    for k in ("model", "stream", "temperature", "top_p", "n",
+              "stop", "presence_penalty", "frequency_penalty", "user"):
+        if k in data:
+            out[k] = data[k]
+
+    # max_output_tokens → max_tokens
+    if "max_output_tokens" in data:
+        out["max_tokens"] = data["max_output_tokens"]
+    elif "max_tokens" in data:
+        out["max_tokens"] = data["max_tokens"]
+
+    # 构造 messages
+    messages: list = []
+
+    # instructions → system message
+    if data.get("instructions"):
+        messages.append({"role": "system", "content": data["instructions"]})
+
+    # input → messages（支持字符串、消息列表两种形式）
+    inp = data.get("input", [])
+    if isinstance(inp, str):
+        messages.append({"role": "user", "content": inp})
+    elif isinstance(inp, list):
+        for item in inp:
+            if isinstance(item, dict):
+                messages.append({
+                    "role": item.get("role", "user"),
+                    "content": item.get("content", ""),
+                })
+
+    out["messages"] = messages
+    return out
+
+
+def _chat_to_responses_body(data: dict) -> dict:
+    """
+    Chat Completions 响应体 → Responses API 响应体（非流式）
+    """
+    choice = (data.get("choices") or [{}])[0]
+    text = (choice.get("message") or {}).get("content") or ""
+    usage = data.get("usage") or {}
+
+    rid = data.get("id") or ""
+    resp_id = f"resp_{rid}" if rid and not rid.startswith("resp_") else (rid or f"resp_{int(time.time())}")
+
+    return {
+        "id": resp_id,
+        "object": "response",
+        "created_at": data.get("created", int(time.time())),
+        "status": "completed",
+        "model": data.get("model", ""),
+        "output": [{
+            "id": "msg_001",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }],
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+        "error": None,
+        "incomplete_details": None,
+        "instructions": None,
+        "metadata": {},
+        "parallel_tool_calls": True,
+        "temperature": data.get("temperature", 1.0),
+        "tool_choice": "auto",
+        "tools": [],
+        "top_p": data.get("top_p", 1.0),
+        "truncation": "disabled",
+    }
+
+
+def _sse(event_type: str, data: dict) -> bytes:
+    """生成一条 SSE 事件"""
+    return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+
+
+async def _responses_stream_adapter(
+    source: AsyncIterator[bytes],
+) -> AsyncIterator[bytes]:
+    """
+    将 Chat Completions SSE 流逐块转换为 Responses API SSE 事件流。
+    Chat 格式: data: {"choices":[{"delta":{"content":"..."}}]}
+    Responses 格式: event: response.output_text.delta / response.done 等
+    """
+    resp_id = f"resp_{int(time.time())}"
+    item_id = "msg_001"
+    model = ""
+    full_text = ""
+    usage: dict = {}
+    started = False
+    buf = b""
+
+    async for raw in source:
+        buf += raw
+        # SSE 事件之间以 \n\n 分隔
+        while b"\n\n" in buf:
+            block, buf = buf.split(b"\n\n", 1)
+            for line in block.splitlines():
+                line = line.strip()
+                if not line.startswith(b"data:"):
+                    continue
+                payload = line[5:].strip().decode("utf-8", errors="replace")
+
+                if payload == "[DONE]":
+                    yield _sse("response.output_text.done", {
+                        "type": "response.output_text.done",
+                        "item_id": item_id, "output_index": 0, "content_index": 0,
+                        "text": full_text,
+                    })
+                    yield _sse("response.output_item.done", {
+                        "type": "response.output_item.done", "output_index": 0,
+                        "item": {
+                            "id": item_id, "type": "message", "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                        },
+                    })
+                    yield _sse("response.done", {
+                        "type": "response.done",
+                        "response": {
+                            "id": resp_id, "object": "response", "status": "completed",
+                            "model": model, "created_at": int(time.time()),
+                            "output": [{
+                                "id": item_id, "type": "message", "role": "assistant",
+                                "status": "completed",
+                                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                            }],
+                            "usage": {
+                                "input_tokens": usage.get("prompt_tokens", 0),
+                                "output_tokens": usage.get("completion_tokens", 0),
+                                "total_tokens": usage.get("total_tokens", 0),
+                            },
+                        },
+                    })
+                    yield b"data: [DONE]\n\n"
+                    return
+
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+
+                # 第一个有效 chunk：发送 created / output_item.added / content_part.added
+                if not started:
+                    model = chunk.get("model", "")
+                    cid = chunk.get("id", "")
+                    resp_id = f"resp_{cid}" if cid else resp_id
+                    yield _sse("response.created", {
+                        "type": "response.created",
+                        "response": {
+                            "id": resp_id, "object": "response",
+                            "status": "in_progress", "model": model,
+                            "output": [], "usage": None,
+                        },
+                    })
+                    yield _sse("response.output_item.added", {
+                        "type": "response.output_item.added", "output_index": 0,
+                        "item": {"id": item_id, "type": "message",
+                                 "role": "assistant", "content": [], "status": "in_progress"},
+                    })
+                    yield _sse("response.content_part.added", {
+                        "type": "response.content_part.added",
+                        "item_id": item_id, "output_index": 0, "content_index": 0,
+                        "part": {"type": "output_text", "text": "", "annotations": []},
+                    })
+                    started = True
+
+                # 增量文本
+                choices = chunk.get("choices") or []
+                if choices:
+                    delta_content = (choices[0].get("delta") or {}).get("content") or ""
+                    if delta_content:
+                        full_text += delta_content
+                        yield _sse("response.output_text.delta", {
+                            "type": "response.output_text.delta",
+                            "item_id": item_id, "output_index": 0, "content_index": 0,
+                            "delta": delta_content,
+                        })
+
+                # 记录 usage（部分上游会在最后一个 chunk 里带）
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+
+
 def _log_messages(body: bytes, local_path: str) -> None:
-    """打印请求中的 model 和 messages 内容，便于排查实际发出的消息"""
+    """打印实际发出请求的 model 和 messages 内容（已经过格式转换后的 chat 格式）"""
     if not body:
         return
     try:
@@ -246,19 +449,24 @@ def _log_messages(body: bytes, local_path: str) -> None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return
     model = data.get("model", "-")
-    messages = data.get("messages") or data.get("input") or []
+    # 兼容 chat 格式 (messages) 和 responses 格式 (input)
+    messages = data.get("messages") or []
+    inp = data.get("input")
+    if not messages and inp:
+        if isinstance(inp, str):
+            messages = [{"role": "user", "content": inp}]
+        elif isinstance(inp, list):
+            messages = inp
     logger.info("  path=%s  model=%s  messages=%d 条", local_path, model, len(messages))
     for i, msg in enumerate(messages):
         role = msg.get("role", "?")
         content = msg.get("content", "")
-        # content 可能是字符串或列表（多模态）
         if isinstance(content, list):
             text = " ".join(
                 part.get("text", "") for part in content if isinstance(part, dict)
             )
         else:
             text = str(content)
-        # 截断过长内容，避免日志刷屏
         preview = text[:200].replace("\n", "\\n")
         if len(text) > 200:
             preview += f"…(+{len(text) - 200})"
@@ -267,6 +475,8 @@ def _log_messages(body: bytes, local_path: str) -> None:
 
 # ── 代理路由（仅 /v1/chat/completions 和 /v1/responses）────────
 async def _proxy_handler(request: Request, local_path: str) -> Response:
+    is_responses = (local_path == "/v1/responses")
+
     # 1. 获取有效 Token
     token = await token_manager.get_token()
 
@@ -276,27 +486,83 @@ async def _proxy_handler(request: Request, local_path: str) -> Response:
     if query_string:
         target_url += f"?{query_string}"
 
-    # 3. 构造请求头（外部同名鉴权字段已被剔除，内部 Token 强制注入）
+    # 3. 构造请求头
     forward_headers = _build_forward_headers(request, token)
 
     # 4. 读取请求体
     body = await request.body()
 
-    # 5. 判断是否流式
+    # 5. /v1/responses → 转换为 chat completions 格式再转发
+    if is_responses and body:
+        try:
+            req_data = json.loads(body)
+            chat_data = _responses_to_chat_body(req_data)
+            body = json.dumps(chat_data, ensure_ascii=False).encode("utf-8")
+            forward_headers["content-type"] = "application/json"
+            forward_headers["content-length"] = str(len(body))
+            logger.info("  [responses→chat] 请求体已转换，原 %d bytes → %d bytes",
+                        len(await request.body()), len(body))
+        except Exception as exc:
+            logger.warning("  [responses→chat] 转换失败，原样转发: %s", exc)
+
+    # 6. 判断是否流式（转换后的 body）
     is_stream = _detect_stream(body)
 
     logger.info(
         "→ %s %s → %s | stream=%s | body=%d bytes",
         request.method, local_path, target_url, is_stream, len(body),
     )
-    # 打印实际发出的消息内容
     _log_messages(body, local_path)
 
-    # 6. 转发
+    # 7. 转发
     if is_stream:
+        if is_responses:
+            # 流式：经过 SSE 格式转换再返回给调用方
+            return _stream_responses_response(request.method, target_url, forward_headers, body)
         return await _proxy_stream(request.method, target_url, forward_headers, body)
     else:
-        return await _proxy_normal(request.method, target_url, forward_headers, body)
+        resp = await _proxy_normal(request.method, target_url, forward_headers, body)
+        if is_responses and resp.status_code == 200:
+            # 非流式：chat 响应体 → responses 响应体
+            try:
+                chat_resp = json.loads(resp.body)
+                responses_resp = _chat_to_responses_body(chat_resp)
+                logger.info("  [chat→responses] 响应体已转换")
+                return Response(
+                    content=json.dumps(responses_resp, ensure_ascii=False).encode("utf-8"),
+                    status_code=200,
+                    media_type="application/json",
+                )
+            except Exception as exc:
+                logger.warning("  [chat→responses] 转换失败，原样返回: %s", exc)
+        return resp
+
+
+def _stream_responses_response(
+    method: str, url: str, headers: dict, body: bytes
+) -> StreamingResponse:
+    """流式 /v1/responses：从 chat SSE 流转换为 Responses API SSE 事件流"""
+
+    async def _gen():
+        async def _chat_chunks() -> AsyncIterator[bytes]:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0),
+                follow_redirects=True, verify=False, trust_env=False,
+            ) as client:
+                async with client.stream(method=method, url=url, headers=headers, content=body) as resp:
+                    logger.info("← %d (stream/responses) %s", resp.status_code, url)
+                    async for chunk in resp.aiter_bytes(chunk_size=512):
+                        if chunk:
+                            yield chunk
+
+        async for event_bytes in _responses_stream_adapter(_chat_chunks()):
+            yield event_bytes
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
 
 
 @app.api_route("/v1/chat/completions", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
