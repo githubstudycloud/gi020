@@ -262,19 +262,49 @@ def _extract_content(content) -> str:
     return str(content) if content else ""
 
 
+def _convert_tools_to_chat(tools: list) -> list:
+    """
+    将 Responses API 格式的 tools 转换为 Chat Completions 格式。
+    Responses API (平铺):  {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+    Chat Completions (嵌套): {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+    已是 Chat Completions 格式（含 "function" 键）则直接透传。
+    """
+    converted = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            converted.append(tool)
+            continue
+        if tool.get("type") == "function" and "function" not in tool:
+            # Responses API 平铺格式 → Chat Completions 嵌套格式
+            fn_obj: dict = {"name": tool.get("name", "")}
+            if "description" in tool:
+                fn_obj["description"] = tool["description"]
+            if "parameters" in tool:
+                fn_obj["parameters"] = tool["parameters"]
+            if "strict" in tool:
+                fn_obj["strict"] = tool["strict"]
+            converted.append({"type": "function", "function": fn_obj})
+        else:
+            # 已是 Chat Completions 格式或其他内置工具类型，直接透传
+            converted.append(tool)
+    return converted
+
+
 def _responses_to_chat_body(data: dict) -> dict:
     """
     OpenAI Responses API 请求体 → Chat Completions 请求体
     主要差异:
-      input / instructions → messages
-      max_output_tokens    → max_tokens
+      input / instructions                 → messages
+      max_output_tokens                    → max_tokens
+      tools (平铺格式)                      → tools (function 嵌套格式)
+      function_call / function_call_output → assistant tool_calls / tool 消息
     """
     out: dict = {}
 
-    # 通用字段直接透传（含工具调用相关字段）
+    # 通用字段直接透传（tools 单独处理格式转换）
     for k in ("model", "stream", "temperature", "top_p", "n",
               "stop", "presence_penalty", "frequency_penalty", "user",
-              "tools", "tool_choice", "parallel_tool_calls"):
+              "tool_choice", "parallel_tool_calls"):
         if k in data:
             out[k] = data[k]
 
@@ -283,6 +313,10 @@ def _responses_to_chat_body(data: dict) -> dict:
         out["max_tokens"] = data["max_output_tokens"]
     elif "max_tokens" in data:
         out["max_tokens"] = data["max_tokens"]
+
+    # tools: Responses API 平铺格式 → Chat Completions function 嵌套格式
+    if "tools" in data and data["tools"]:
+        out["tools"] = _convert_tools_to_chat(data["tools"])
 
     # 构造 messages
     messages: list = []
@@ -296,12 +330,54 @@ def _responses_to_chat_body(data: dict) -> dict:
     if isinstance(inp, str):
         messages.append({"role": "user", "content": inp})
     elif isinstance(inp, list):
+        # 收集连续的 function_call 项，合并为一条 assistant 消息的 tool_calls
+        pending_tool_calls: list = []
+
+        def _flush_tool_calls() -> None:
+            if pending_tool_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": list(pending_tool_calls),
+                })
+                pending_tool_calls.clear()
+
         for item in inp:
-            if isinstance(item, dict):
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type", "")
+
+            if item_type == "function_call":
+                # Responses API function_call → Chat Completions tool_calls（assistant 消息）
+                pending_tool_calls.append({
+                    "id": item.get("call_id") or item.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", "{}"),
+                    },
+                })
+
+            elif item_type == "function_call_output":
+                # 先落盘前面积累的 function_call
+                _flush_tool_calls()
+                # Responses API function_call_output → Chat Completions tool 消息
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": item.get("call_id", ""),
+                    "content": item.get("output", ""),
+                })
+
+            else:
+                # 普通 user / assistant / system 消息
+                _flush_tool_calls()
                 messages.append({
                     "role": item.get("role", "user"),
                     "content": _extract_content(item.get("content", "")),
                 })
+
+        # 循环结束后清空残留的 function_call
+        _flush_tool_calls()
 
     out["messages"] = messages
     return out
